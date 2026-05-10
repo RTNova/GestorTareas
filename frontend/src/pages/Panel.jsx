@@ -2,7 +2,7 @@
 // PANEL PRINCIPAL
 // Muestra: listas (izquierda) + tareas de la lista seleccionada (derecha)
 // ============================================================
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 
@@ -10,45 +10,53 @@ function Panel() {
   // ---- Estado general ----
   const [usuario,       setUsuario]       = useState(null);
   const [listas,        setListas]        = useState([]);
-  const [listaActiva,   setListaActiva]   = useState(null);  // lista seleccionada
+  const [listaActiva,   setListaActiva]   = useState(null);
   const [tareas,        setTareas]        = useState([]);
-  const [filtroStatus,  setFiltroStatus]  = useState('all'); // all | pending | completed
-  const [recordatorios, setRecordatorios] = useState([]);    // recordatorios pendientes
+  const [filtroStatus,  setFiltroStatus]  = useState('all');     // all | pending | completed
+  const [filtroPrio,    setFiltroPrio]    = useState('all');     // all | low | medium | high
+  const [ordenPrio,     setOrdenPrio]     = useState('ninguno'); // ninguno | asc | desc
+  const [recordatorios, setRecordatorios] = useState([]);
 
-  // Estado para formulario nueva lista
+  // Formulario nueva lista
   const [nombreLista, setNombreLista] = useState('');
 
-  // Estado para formulario nueva tarea
-  const [textoTarea,    setTextoTarea]    = useState('');
-  const [prioTarea,     setPrioTarea]     = useState('medium');
-  const [fechaRecord,   setFechaRecord]   = useState('');
+  // Formulario nueva tarea
+  const [textoTarea,  setTextoTarea]  = useState('');
+  const [prioTarea,   setPrioTarea]   = useState('medium');
+  const [fechaRecord, setFechaRecord] = useState('');
 
   // Mensajes
-  const [loadingTareas,  setLoadingTareas]  = useState(false);
-  const [errorTareas,    setErrorTareas]    = useState('');
-  const [errorListas,    setErrorListas]    = useState('');
+  const [loadingTareas, setLoadingTareas] = useState(false);
+  const [errorTareas,   setErrorTareas]   = useState('');
+  const [errorListas,   setErrorListas]   = useState('');
+
+  // useRef para guardar el intervalo y poder limpiarlo cuando el usuario salga
+  const intervaloRef = useRef(null);
 
   const navigate = useNavigate();
 
-  // ---- Al cargar, obtener datos del usuario y sus listas ----
+  // ---- Al cargar la página ----
   useEffect(() => {
     cargarUsuario();
     cargarListas();
+
+    // Comprobamos recordatorios nada más entrar
+    comprobarRecordatorios();
+
+    // Y luego cada 25 segundos
+    intervaloRef.current = setInterval(comprobarRecordatorios, 25000);
+
+    // Limpiamos el intervalo cuando el usuario sale del panel
+    return () => clearInterval(intervaloRef.current);
   }, []);
 
-  // ---- Cuando cambia la lista activa o el filtro, recargar tareas ----
+  // ---- Recargar tareas cuando cambia la lista activa o el filtro de estado ----
   useEffect(() => {
     if (listaActiva) cargarTareas();
   }, [listaActiva, filtroStatus]);
 
-  // ---- Comprobar recordatorios cada 25 segundos ----
-  useEffect(() => {
-    const intervalo = setInterval(comprobarRecordatorios, 25000);
-    return () => clearInterval(intervalo); // limpiar al desmontar
-  }, []);
-
   // ================================================================
-  // FUNCIONES DE USUARIO
+  // USUARIO
   // ================================================================
 
   async function cargarUsuario() {
@@ -56,18 +64,18 @@ function Panel() {
       const res = await api.get('/auth/me');
       setUsuario(res.data);
     } catch {
-      // Si falla (token inválido), mandar al login
       cerrarSesion();
     }
   }
 
   function cerrarSesion() {
+    clearInterval(intervaloRef.current); // paramos los recordatorios al salir
     localStorage.removeItem('token');
     navigate('/login');
   }
 
   // ================================================================
-  // FUNCIONES DE LISTAS
+  // LISTAS
   // ================================================================
 
   async function cargarListas() {
@@ -94,10 +102,8 @@ function Panel() {
   async function renombrarLista(lista) {
     const nuevoNombre = prompt('Nuevo nombre:', lista.name);
     if (!nuevoNombre || nuevoNombre === lista.name) return;
-
     try {
       const res = await api.patch(`/lists/${lista._id}`, { name: nuevoNombre });
-      // Actualizamos la lista en el estado local
       setListas(listas.map(l => l._id === lista._id ? res.data : l));
     } catch (err) {
       alert(err.response?.data?.error || 'Error al renombrar');
@@ -106,11 +112,9 @@ function Panel() {
 
   async function borrarLista(lista) {
     if (!confirm(`¿Borrar la lista "${lista.name}" y todas sus tareas?`)) return;
-
     try {
       await api.delete(`/lists/${lista._id}`);
       setListas(listas.filter(l => l._id !== lista._id));
-      // Si era la activa, limpiar
       if (listaActiva?._id === lista._id) {
         setListaActiva(null);
         setTareas([]);
@@ -121,7 +125,7 @@ function Panel() {
   }
 
   // ================================================================
-  // FUNCIONES DE TAREAS
+  // TAREAS
   // ================================================================
 
   async function cargarTareas() {
@@ -142,7 +146,6 @@ function Panel() {
     if (!listaActiva) { alert('Selecciona una lista primero'); return; }
     if (!textoTarea.trim()) return;
     setErrorTareas('');
-
     try {
       const body = {
         listId:      listaActiva._id,
@@ -153,7 +156,7 @@ function Panel() {
       if (fechaRecord) body.reminderAt = fechaRecord;
 
       const res = await api.post('/tasks', body);
-      setTareas([res.data, ...tareas]); // añadir al principio
+      setTareas([res.data, ...tareas]);
       setTextoTarea('');
       setFechaRecord('');
       setPrioTarea('medium');
@@ -191,29 +194,51 @@ function Panel() {
   }
 
   // ================================================================
-  // RECORDATORIOS
+  // FILTRO Y ORDEN POR PRIORIDAD (se hace en el frontend, sin llamar al servidor)
   // ================================================================
 
-  const comprobarRecordatorios = useCallback(async () => {
+  // Valor numérico para poder ordenar: high=3, medium=2, low=1
+  const valorPrio = { high: 3, medium: 2, low: 1 };
+
+  const tareasFiltradas = tareas
+    // 1. Filtrar por prioridad si el usuario eligió una concreta
+    .filter(t => filtroPrio === 'all' || t.priority === filtroPrio)
+    // 2. Ordenar si el usuario eligió un orden
+    .sort((a, b) => {
+      if (ordenPrio === 'desc') return valorPrio[b.priority] - valorPrio[a.priority]; // mayor primero
+      if (ordenPrio === 'asc')  return valorPrio[a.priority] - valorPrio[b.priority]; // menor primero
+      return 0; // sin orden -> mantener el orden original
+    });
+
+  // ================================================================
+  // RECORDATORIOS
+  // Comprobamos cada 20-30 seg, mostramos aviso, y al pulsar
+  // "Entendido" llama a mark-sent para que no vuelva a aparecer.
+  // ================================================================
+
+  async function comprobarRecordatorios() {
+    if (!localStorage.getItem('token')) return; // si no hay sesión, no hacemos nada
     try {
       const res = await api.get('/reminders/pending');
       if (res.data.length > 0) {
         setRecordatorios(res.data);
       }
     } catch {
-      // Silencioso: si falla no molestamos al usuario
+      // Silencioso
     }
-  }, []);
+  }
 
-  async function marcarRecordatorioVisto(tareaId) {
-    try {
-      await api.post(`/reminders/${tareaId}/mark-sent`);
-      // Quitamos ese recordatorio del modal
-      setRecordatorios(recordatorios.filter(t => t._id !== tareaId));
-    } catch {
-      // Igualmente lo quitamos de la vista
-      setRecordatorios(recordatorios.filter(t => t._id !== tareaId));
+  // Llamamos a mark-sent por cada tarea del modal para que no vuelva a salir el mismo recordatorio
+  async function marcarTodosVistos() {
+    // Llamamos a mark-sent por cada tarea del modal
+    for (const tarea of recordatorios) {
+      try {
+        await api.post(`/reminders/${tarea._id}/mark-sent`);
+      } catch {
+        // Si falla uno continuamos con los demás
+      }
     }
+    setRecordatorios([]); // cerramos el modal
   }
 
   // ================================================================
@@ -226,24 +251,24 @@ function Panel() {
       {/* Barra superior */}
       <div className="topbar">
         <strong>📋 Gestión de Tareas</strong>
-        <span>👤 {usuario?.name || '...'}</span>
+        <span>👤 Bienvenido, {usuario?.name || '...'}</span>
         <button onClick={cerrarSesion}>Cerrar sesión</button>
       </div>
 
-      {/* Modal de recordatorios */}
+      {/* ---- Modal de recordatorios ----
+          Aparece automáticamente cuando hay recordatorios vencidos.
+          Lo mostramos y llamamos a marcarTodosVistos al cerrar. */}
       {recordatorios.length > 0 && (
         <div className="modal-overlay">
           <div className="modal-box">
-            <h3>⏰ Recordatorio</h3>
+            <h3>⏰ Recordatorio pendiente</h3>
+            <p style={{ marginBottom: '10px', fontSize: '13px', color: '#666' }}>
+              Las siguientes tareas tienen un recordatorio vencido:
+            </p>
             {recordatorios.map(t => (
               <p key={t._id}>📌 {t.text}</p>
             ))}
-            <button onClick={() => {
-              // Marcar todos como vistos
-              recordatorios.forEach(t => marcarRecordatorioVisto(t._id));
-            }}>
-              Entendido
-            </button>
+            <button onClick={marcarTodosVistos}>Entendido</button>
           </div>
         </div>
       )}
@@ -255,7 +280,6 @@ function Panel() {
         <div className="sidebar">
           <h3>Mis listas</h3>
 
-          {/* Formulario nueva lista */}
           <input
             type="text"
             placeholder="Nombre de la lista..."
@@ -267,7 +291,6 @@ function Panel() {
 
           {errorListas && <p className="msg-error">{errorListas}</p>}
 
-          {/* Lista de listas */}
           {listas.length === 0 && (
             <p style={{ fontSize: '12px', color: '#aaa' }}>No hay listas todavía</p>
           )}
@@ -298,7 +321,7 @@ function Panel() {
             <p className="msg-empty">← Selecciona una lista para ver sus tareas</p>
           ) : (
             <>
-              <h2>📁 {listaActiva.name}</h2>
+              <h2>📁 Lista {listaActiva.name}</h2>
 
               {/* Formulario nueva tarea */}
               <form className="task-form" onSubmit={crearTarea}>
@@ -309,24 +332,36 @@ function Panel() {
                   onChange={e => setTextoTarea(e.target.value)}
                   required
                 />
-                <select value={prioTarea} onChange={e => setPrioTarea(e.target.value)}>
-                  <option value="low">🟢 Baja</option>
-                  <option value="medium">🟡 Media</option>
-                  <option value="high">🔴 Alta</option>
-                </select>
-                <input
-                  type="datetime-local"
-                  value={fechaRecord}
-                  onChange={e => setFechaRecord(e.target.value)}
-                  title="Recordatorio (opcional)"
-                />
-                <button type="submit">Añadir</button>
+
+                {/* Selector de prioridad con etiqueta encima */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <label style={{ fontSize: '11px', color: '#888' }}>Prioridad</label>
+                  <select value={prioTarea} onChange={e => setPrioTarea(e.target.value)}>
+                    <option value="low">🟢 Baja</option>
+                    <option value="medium">🟡 Media</option>
+                    <option value="high">🔴 Alta</option>
+                  </select>
+                </div>
+
+                {/* Selector de fecha con etiqueta encima */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <label style={{ fontSize: '11px', color: '#888' }}>Recordatorio (opcional)</label>
+                  <input
+                    type="datetime-local"
+                    value={fechaRecord}
+                    onChange={e => setFechaRecord(e.target.value)}
+                  />
+                </div>
+
+                <button type="submit" style={{ alignSelf: 'flex-end' }}>Añadir</button>
               </form>
 
               {errorTareas && <p className="msg-error">{errorTareas}</p>}
 
-              {/* Filtros */}
+              {/* ---- Filtros ---- */}
               <div className="filters">
+
+                {/* Filtro por estado */}
                 {['all', 'pending', 'completed'].map(f => (
                   <button
                     key={f}
@@ -336,28 +371,57 @@ function Panel() {
                     {f === 'all' ? 'Todas' : f === 'pending' ? 'Pendientes' : 'Completadas'}
                   </button>
                 ))}
+
+                <span style={{ color: '#ccc', margin: '0 4px' }}>|</span>
+
+                {/* Filtro por prioridad */}
+                {[
+                  { valor: 'all',    texto: 'Todas' },
+                  { valor: 'high',   texto: '🔴 Alta' },
+                  { valor: 'medium', texto: '🟡 Media' },
+                  { valor: 'low',    texto: '🟢 Baja' },
+                ].map(f => (
+                  <button
+                    key={f.valor}
+                    className={filtroPrio === f.valor ? 'active' : ''}
+                    onClick={() => setFiltroPrio(f.valor)}
+                  >
+                    {f.texto}
+                  </button>
+                ))}
+
+                <span style={{ color: '#ccc', margin: '0 4px' }}>|</span>
+
+                {/* Ordenar por prioridad */}
+                <select
+                  value={ordenPrio}
+                  onChange={e => setOrdenPrio(e.target.value)}
+                  style={{ padding: '6px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '12px' }}
+                >
+                  <option value="ninguno">Sin ordenar</option>
+                  <option value="desc">Mayor prioridad primero</option>
+                  <option value="asc">Menor prioridad primero</option>
+                </select>
               </div>
 
               {/* Lista de tareas */}
               {loadingTareas && <p className="msg-loading">Cargando...</p>}
 
-              {!loadingTareas && tareas.length === 0 && (
-                <p className="msg-empty">No hay tareas en esta lista</p>
+              {!loadingTareas && tareasFiltradas.length === 0 && (
+                <p className="msg-empty">No hay tareas disponibles, ¡buen trabajo!</p>
               )}
 
-              {tareas.map(tarea => (
+              {tareasFiltradas.map(tarea => (
                 <div
                   key={tarea._id}
                   className={`task-card priority-${tarea.priority} ${tarea.completed ? 'completed' : ''}`}
                 >
-                  {/* Checkbox para marcar completada */}
                   <input
                     type="checkbox"
                     checked={tarea.completed}
                     onChange={() => toggleCompleted(tarea)}
                   />
 
-                  {/* Info de la tarea */}
                   <div className="task-info">
                     <div className="task-text">{tarea.text}</div>
                     <div className="task-meta">
@@ -370,7 +434,6 @@ function Panel() {
                     </div>
                   </div>
 
-                  {/* Acciones */}
                   <div className="task-actions">
                     <select
                       value={tarea.priority}

@@ -4,7 +4,7 @@
 // ============================================================
 const jwt = require('jsonwebtoken');
 
-const SECRET = 'mi_clave_secreta_123'; // En producción usaría una variable de entorno
+const SECRET = 'clave_super_secreta_!23'; // En producción usaría una variable de entorno
 
 function authMiddleware(req, res, next) {
   // El token viene en la cabecera: Authorization: Bearer <token>
